@@ -1,0 +1,17 @@
+\__pycache__
+\venv
+/Baseline/Output
+/Current
+/Former
+/tabsurvey/Results/best_params
+/tabsurvey/Results
+/GNNs/datasets/cache
+/GNNs/results
+/GNNs/runs
+/GNNs/fev1_clinical_variables.csv
+/GNNs/fev1_X.csv
+/GNNs/fev1_Y.csv
+/GNNs/HiddenLayerOutput_GCN_trimmed_fev1_0.515_0.111_adj.csv
+/GNNs/trimmed_fev1_0.515_0.111_adj.csv
+/tabsurvey\Results
+.python-version

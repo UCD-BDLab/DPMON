@@ -1,0 +1,12 @@
+#Run pip install -r requirements.txt to install dependencies
+
+pandas
+matplotlib
+torch
+torch-geometric
+torch_scatter
+scikit-learn
+networkx
+ray
+ray[tune]
+tensorboardX
