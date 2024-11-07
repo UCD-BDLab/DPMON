@@ -3,12 +3,12 @@ import numpy as np
 import sys
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
 
 sys.stdout = open(
-    "/home/vicente/BDLab/NetCo/BioInformedSubjectRepresentation/Baseline/Output/model_output.txt",
+    "/Baseline/Output/model_output.txt",
     "w",
 )
 
@@ -26,7 +26,7 @@ network_columns = {}
 for network in CurrentSmokers_Networks:
     network_columns[network] = []
 
-path = "/home/vicente/BDLab/NetCo/BioInformedSubjectRepresentation/Current/"
+path = "/Current/"
 
 for network in CurrentSmokers_Networks:
     df = pd.read_csv(f"{path}{network}.csv")
@@ -115,7 +115,7 @@ FormerSmokers_Networks = [
 ]
 
 
-former_path = "/home/vicente/BDLab/NetCo/BioInformedSubjectRepresentation/Former/"
+former_path = "/Former/"
 former_smoker_network = {}
 
 for name in FormerSmokers_Networks:
