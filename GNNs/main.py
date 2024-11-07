@@ -1,323 +1,260 @@
-# TODO: Refactor the code - Remove unnecessary print statements
-# TODO: Add support in the code for the two modes (regular and hyperparameter tuning)
-# TODO: Finalize the list of parameters to fine-tune
-
-import re
 import os
-from functools import partial
-from torch_geometric.explain import Explainer, GNNExplainer
-from sklearn.model_selection import ParameterGrid
-from tensorboardX import SummaryWriter
-from torch_geometric.transforms import RandomNodeSplit
-from torch_geometric.loader import DataLoader
-
 from args import *
-from model import *
-from utils import *
 from dataset import *
+from model import *
+import statistics
+from functools import partial
 
-from ray import tune
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.metrics import confusion_matrix, classification_report
+
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.model_selection import train_test_split, GridSearchCV
+from torch_geometric.transforms import RandomNodeSplit
+from torchmetrics.classification import MulticlassAUROC
+
 from ray.tune import CLIReporter
 from ray.tune.schedulers import ASHAScheduler
+import tempfile
+from ray import train, tune
+from ray.train import Checkpoint
 
-# TODO: Create a Different Config for Each Flavor of GNN
-GCN_CONFIG = {
-    "lr": tune.loguniform(1e-4, 1e-1),
-    "weight_decay": tune.loguniform(1e-4, 1e-1),
-    "layer_num": tune.choice([2, 4, 8, 16, 32, 64, 128]),
-    "hidden_dim": tune.choice([4, 8, 16, 32, 64, 128]),
-    "epoch_num": tune.choice([2, 16, 64, 512, 1024, 4096, 8192]),
+# Hyperparameters for the Entire Neural Network Pipeline
+PIPELINE_CONFIGS = {
+    'gnn_layer_num': tune.choice([2, 4, 8, 16, 32, 64, 128]),
+    'gnn_hidden_dim': tune.choice([4, 8, 16, 32, 64, 128]),
+    'lr': tune.loguniform(1e-4, 1e-1),
+    'weight_decay': tune.loguniform(1e-4, 1e-1),
+    'nn_hidden_dim1': tune.choice([4, 8, 16, 32, 64, 128]),
+    'nn_hidden_dim2': tune.choice([4, 8, 16, 32, 64, 128]),
+    'num_epochs': tune.choice([2, 16, 64, 512, 1024, 4096, 8192]),
 }
+HYPERPARAMETERS_TUNING = False
+GNN_MODEL = 'GIN'
+
+class NeuralNetwork(nn.Module):
+    def __init__(self,
+                 gnn_input_dim,
+                 gnn_hidden_dim,
+                 gnn_layer_num,
+                 ae_encoding_dim,
+                 nn_input_dim,
+                 nn_hidden_dim1,
+                 nn_hidden_dim2,
+                 nn_output_dim):
+        super(NeuralNetwork, self).__init__()
+
+        self.gnn = ''  # GNN Model
+        if GNN_MODEL == 'GCN':
+            self.gnn = GCN(input_dim=gnn_input_dim, hidden_dim=gnn_hidden_dim, layer_num=gnn_layer_num)
+        elif GNN_MODEL == 'GAT':
+            self.gnn = GAT(input_dim=gnn_input_dim, hidden_dim=gnn_hidden_dim, layer_num=gnn_layer_num)
+        elif GNN_MODEL == 'GIN':
+            self.gnn = GIN(input_dim=gnn_input_dim, hidden_dim=gnn_hidden_dim, layer_num=gnn_layer_num)
+        elif GNN_MODEL == 'SAGE':
+                self.gnn = SAGE(input_dim=gnn_input_dim, hidden_dim=gnn_hidden_dim, layer_num=gnn_layer_num)
+        else:
+            raise RuntimeError(f'GNN model {GNN_MODEL} not Recognized')
+
+        # TODO: Revisit the Autoencoder - Since we Only Need to Encode so the Model doesn't learn here!
+        self.autoencoder = Autoencoder(input_dim=gnn_hidden_dim, encoding_dim=ae_encoding_dim)
+        self.dim_averaging = DimensionAveraging()
+        self.predictor = DownstreamTaskNN(nn_input_dim, nn_hidden_dim1, nn_hidden_dim2, nn_output_dim)
+        # self.predictor = LogisticRegression(nn_input_dim, nn_output_dim)
+
+    def forward(self, omics_dataset, omics_network_tg):
+        # print(omics_network_tg)
+        omics_network_nodes_embedding = self.gnn(omics_network_tg)
+
+        # print("Dimenions of Embeddings after GCN")
+        # print(omics_network_nodes_embedding.shape)
+        # print(omics_network_nodes_embedding)
+        omics_network_nodes_embedding_ae = self.autoencoder(omics_network_nodes_embedding)
+        # print("Scaling Factors %s" % omics_network_nodes_embedding_ae)
+        # print("Embeddings %s" % omics_network_nodes_embedding_ae)
+
+        # print("Dimensions of Embeddings after Autoencoder")
+        # print(omics_network_nodes_embedding_ae.shape)
+        # print(omics_network_nodes_embedding_ae)
+
+        omics_network_nodes_embedding_avg = self.dim_averaging(omics_network_nodes_embedding_ae)
+
+        # print("Dimensions of Embeddings after Averaging")
+        # print(omics_network_nodes_embedding_avg.shape)
+        # print("Averaging Embeddings %s" % omics_network_nodes_embedding_avg)
+
+        # Multiplying the original_dataset with the generated embeddings
+        omics_dataset_with_embeddings = torch.mul(omics_dataset,
+                                                  omics_network_nodes_embedding_avg.expand(omics_dataset.shape[1],
+                                                                                           omics_dataset.shape[0]).t())
+        predictions = self.predictor(omics_dataset_with_embeddings)
+
+        return predictions, omics_dataset_with_embeddings
 
 
-def train(config, args, datasets_name):
-    device = torch.device("cuda:" + str(args.cuda) if args.gpu else "cpu")
+def train_n(config, omics_dataset, omics_network_tg):
+    X = omics_dataset.drop(['finalgold_visit'], axis=1)
+    Y = omics_dataset['finalgold_visit']
+    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.3, random_state=42)
 
-    for dataset_name in datasets_name:
-        # TODO: Double Check that the 'runs' Directory is the Correct Directory for this?
-        writer_train = SummaryWriter(comment=dataset_name + "_" + args.model + "_train")
-        writer_val = SummaryWriter(comment=dataset_name + "_" + args.model + "_val")
-        writer_test = SummaryWriter(comment=dataset_name + "_" + args.model + "_test")
+    # TODO: Double Check if the Dataset is already Standardized
+    # scaler = StandardScaler()
+    # X_train_scaled = scaler.fit_transform(X_train.to_numpy())
+    # X_test_scaled = scaler.transform(X_test.to_numpy())
 
-        results = []
-        for repeat in range(args.repeat_num):
-            result_val = []
-            result_test = []
-            start_time = time.time()
+    # Convert to PyTorch Tensors
+    X_train_tensor = torch.FloatTensor(X_train.to_numpy())
+    y_train_tensor = torch.LongTensor(y_train.to_numpy())
 
-            dataset = get_tg_dataset(args, dataset_name, use_cache=args.cache)
-            dataset_load_time = time.time() - start_time
-            print(dataset_name, "load time", dataset_load_time)
+    X_test_tensor = torch.FloatTensor(X_test.to_numpy())
+    y_test_tensor = torch.LongTensor(y_test.to_numpy())
 
-            print("Dataset %s" % dataset)
+    gnn_input_dim = omics_network_tg.x.shape[1]
+    nn_input_dim = X_train_tensor.shape[1]
+    nn_output_dim = 6  # Number of Classes # TODO: If we Merge Classes; then Update the Number of Classes here
 
-            # Understading how they select the anchor_set
-            # preselect_anchor(data, layer_num=config['layer_num'], anchor_num=config['anchor_num'], device='cpu')
+    # lr_model = LogisticRegression(nn_input_dim, nn_output_dim)
+    nn_model = NeuralNetwork(gnn_input_dim=gnn_input_dim,
+                             gnn_hidden_dim=config['gnn_hidden_dim'],
+                              gnn_layer_num=config['gnn_layer_num'],
+                              ae_encoding_dim=1,
+                              nn_input_dim=nn_input_dim, nn_hidden_dim1=config['nn_hidden_dim1'],
+                              nn_hidden_dim2=config['nn_hidden_dim2'],
+                              nn_output_dim=nn_output_dim)
 
-            transform = RandomNodeSplit(num_val=3, num_test=5)
-            data = transform(dataset)
-            dataloader = DataLoader([data], batch_size=1, shuffle=True)
-            # Figuring out how to send data to GPU with dataloader
-            # data = data.to(device)
+    # Define the Loss Function and the Optimizer for the NN Model
+    nn_criterion = nn.CrossEntropyLoss()
+    nn_optimizer = optim.Adam(nn_model.parameters(), lr=config['lr'], weight_decay=config['weight_decay'])
 
-            # Model
-            num_features = dataset.x.shape[1]
-            input_dim = num_features
-            edge_weight_dim = dataset.edge_attr.shape[0]
-            output_dim = 1
+    # Define the Loss Function and the Optimizer for the LR Model
+    # lr_criterion = nn.CrossEntropyLoss()
+    # lr_optimizer = optim.Adam(lr_model.parameters(), lr=config['lr'], weight_decay=config['weight_decay'])
 
-            # TODO: Figure out a better way to make this dynamic (right now it only runs for PGNN)
+    # Training loop
+    for epoch in range(config['num_epochs']):
+        nn_optimizer.zero_grad()
+        # lr_optimizer.zero_grad()
+        # Forward Pass
+        output, omics_dataset_with_embeddings = nn_model(X_train_tensor, omics_network_tg)
+        # lr_output = lr_model(X_train_tensor)
+        # Compute the Loss Value
+        loss = nn_criterion(output, y_train_tensor)
+        # lr_loss = lr_criterion(lr_output, y_train_tensor)
 
-            # model = PGNN(input_dim=input_dim, feature_dim=args.feature_dim,
-            #              hidden_dim=config['hidden_dim'], output_dim=output_dim,
-            #              feature_pre=args.feature_pre, layer_num=config['layer_num'],
-            #              dropout=args.dropout, hidden_dim_name=dataset_name).to(device)
+        # Backward Propagation
+        loss.backward()
+        nn_optimizer.step()
 
-            model = GCN(
-                input_dim=input_dim,
-                hidden_dim=config["hidden_dim"],
-                output_dim=output_dim,
-                layer_num=config["layer_num"],
-                dropout=args.dropout,
-                hidden_dim_name=dataset_name,
-            ).to(device)
+        # lr_loss.backward()
+        # lr_optimizer.step()
 
-            # model = GCNExplainer(input_dim=input_dim, hidden_dim=config['hidden_dim'], output_dim=output_dim,
-            #             layer_num=config['layer_num'], dropout=args.dropout, hidden_dim_name=dataset_name).to(device)
+        # Print the Loss Value for Monitoring
+        # print(f"Epoch [{epoch + 1}/{epoch}], Loss: {loss.item()}")
 
-            # model = GCN2(input_dim=input_dim, hidden_dim=config['hidden_dim'], output_dim=output_dim,
-            #              hidden_dim_name=dataset_name, layer_num=config['layer_num'], alpha=0.1, theta=0.5,
-            #              shared_weights=True, dropout=args.dropout).to(device)
+        if HYPERPARAMETERS_TUNING:
+            metrics = {"loss": loss.item()}
+            with tempfile.TemporaryDirectory() as tempdir:
+                torch.save(
+                    {"epoch": epoch, "model_state": nn_model.state_dict()},
+                    os.path.join(tempdir, "checkpoint.pt"),
+                )
+                train.report(metrics=metrics, checkpoint=Checkpoint.from_directory(tempdir))
 
-            # model = GAT(input_dim=input_dim, hidden_dim=config['hidden_dim'], output_dim=output_dim,
-            #             layer_num=config['layer_num'], dropout=args.dropout, hidden_dim_name=dataset_name).to(device)
+        with torch.no_grad():
+            nn_model.eval()
+            # lr_model.eval()
 
-            # model = GAT2(input_dim=input_dim, hidden_dim=config['hidden_dim'], output_dim=output_dim,
-            #             layer_num=config['layer_num'], dropout=args.dropout, hidden_dim_name=dataset_name).to(device)
+            # lr_preds = lr_model(X_test_tensor)
+            # l, predicted = torch.max(lr_preds, 1)
+            # accuracy = torch.sum(predicted == y_test_tensor).item() / len(y_test)
+            # print("Accuracy with LR: {:.4f}".format(accuracy))
 
-            # model = SAGE(input_dim=input_dim, hidden_dim=config['hidden_dim'], output_dim=output_dim,
-            #             layer_num=config['layer_num'], dropout=args.dropout, hidden_dim_name=dataset_name).to(device)
+            preds, omics_dataset_with_embeddings = nn_model(X_test_tensor, omics_network_tg)
+            l, predicted = torch.max(preds, 1)
+            accuracy = torch.sum(predicted == y_test_tensor).item() / len(y_test)
 
-            # model = GIN(input_dim=input_dim, hidden_dim=config['hidden_dim'], output_dim=output_dim,
-            #              layer_num=config['layer_num'], dropout=args.dropout, hidden_dim_name=dataset_name).to(device)
+            # confusion_mtrx = confusion_matrix(y_test_tensor, predicted)
+            # mc_auroc = MulticlassAUROC(num_classes=3, average='macro', thresholds=None)
+            # print(f'Test Accuracy: {accuracy}')
+            # print(f'Classification Report: {classification_report(y_test_tensor, predicted)}')
+            # print(f'ROC AUC Score: {mc_auroc(outputs, y_test_tensor)}')
+            # print(f'Confusion Matrix: {confusion_mtrx}')
 
-            # Loss
-            # optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], weight_decay=5e-4)
-            optimizer = torch.optim.Adam(
-                model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"]
-            )
-            # optimizer = torch.optim.Adam([
-            #     dict(params=model.convs.parameters(), weight_decay=0.01),
-            #     dict(params=model.linear.parameters(), weight_decay=5e-4)
-            # ], lr=0.01)
-            loss_func = torch.nn.MSELoss()
+            if HYPERPARAMETERS_TUNING:
+                metrics["accuracy"] = accuracy
+                with tempfile.TemporaryDirectory() as tempdir:
+                    train.report(metrics=metrics, checkpoint=Checkpoint.from_directory(tempdir))
 
-            for epoch in range(config["epoch_num"]):
-                print("********** Epoch %d" % epoch)
-                loss_train = 0
-                if epoch == 200:
-                    for param_group in optimizer.param_groups:
-                        param_group["lr"] /= 10
-
-                # if args.permute:
-                #     preselect_anchor(data, layer_num=config['layer_num'], anchor_num=config['anchor_num'], device=device)
-
-                for batch in dataloader:
-                    # print("Batch %s" % batch.train_mask)
-                    # print("Data %s" % data)
-                    print("Before Train")
-                    model.train()
-                    print("After Train")
-                    optimizer.zero_grad()
-                    if args.model == "GCNExplainer":
-                        out = model(batch.x, batch.edge_index).flatten()
-                    else:
-                        print("Before Out")
-                        out = model(batch).flatten()
-                        print("After Out")
-                    # print("Expected %s\nPredicted %s" % (batch.y[batch.train_mask], out[batch.train_mask]))
-                    loss = loss_func(out[batch.train_mask], batch.y[batch.train_mask])
-
-                    # update
-                    loss.backward()
-                    optimizer.step()
-                    # print("Actual %s\nPredicted: %s" % (batch.y[batch.train_mask], out[batch.train_mask]))
-
-                    loss_train += (
-                        loss_func(out[batch.train_mask], batch.y[batch.train_mask])
-                        .cpu()
-                        .data.numpy()
-                    )
-
-                loss_train /= len(dataloader.dataset)
-
-                if epoch % args.epoch_log == 0:
-                    # evaluate
-                    print("Before Eval")
-                    model.eval()
-                    print("After Eval")
-                    loss_train = 0
-                    loss_val = 0
-                    loss_test = 0
-
-                    if args.model == "GCNExplainer":
-                        out = model(batch.x, batch.edge_index).flatten()
-                    else:
-                        print("Before Out Eval")
-                        out = model(batch).flatten()
-                        print("After Out Eval")
-                    print(
-                        "[Train] Expected: %s\nActual: %s"
-                        % (batch.y[batch.train_mask], out[batch.train_mask])
-                    )
-                    loss_train += (
-                        loss_func(out[batch.train_mask], batch.y[batch.train_mask])
-                        .cpu()
-                        .data.numpy()
-                    )
-                    loss_val += (
-                        loss_func(out[batch.val_mask], batch.y[batch.val_mask])
-                        .cpu()
-                        .data.numpy()
-                    )
-                    loss_test += (
-                        loss_func(out[batch.test_mask], batch.y[batch.test_mask])
-                        .cpu()
-                        .data.numpy()
-                    )
-
-                    print(
-                        repeat,
-                        epoch,
-                        "Train Loss {:.4f}".format(loss_train),
-                        "Validate Loss {:.4f}".format(loss_val),
-                        "Test Loss {:.4f}".format(loss_test),
-                    )
-
-                    writer_train.add_scalar(
-                        "repeat_" + str(repeat) + "/loss_" + dataset_name,
-                        loss_train,
-                        epoch,
-                    )
-                    writer_val.add_scalar(
-                        "repeat_" + str(repeat) + "/loss_" + dataset_name,
-                        loss_val,
-                        epoch,
-                    )
-                    writer_test.add_scalar(
-                        "repeat_" + str(repeat) + "/loss_" + dataset_name,
-                        loss_test,
-                        epoch,
-                    )
-
-                    result_val.append(loss_val)
-                    result_test.append(loss_test)
-                    if args.tune:
-                        with tune.checkpoint_dir(epoch) as checkpoint_dir:
-                            path = os.path.join(checkpoint_dir, "checkpoint")
-                            torch.save(
-                                (model.state_dict(), optimizer.state_dict()), path
-                            )
-                        tune.report(loss=loss_val)
-
-            result_val = np.array(result_val)
-            result_test = np.array(result_test)
-            results.append(result_val[np.argmin(result_val)])
-        print("-----------------Final-------------------")
-        print(results)
-
-        # ######################### GNN Explainer ####################33
-        # explainer = Explainer(
-        #     model=model,
-        #     algorithm=GNNExplainer(epochs=500),
-        #     explanation_type='model',
-        #     node_mask_type='attributes',
-        #     edge_mask_type='object',
-        #     model_config=dict(
-        #         # mode='multiclass_classification',
-        #         mode='regression',
-        #         task_level='node',
-        #         return_type='raw',
-        #     ),
-        # )
-        # for node_index in range(data.x.shape[0]):
-        #     explanation = explainer(data.x, data.edge_index, index=node_index)
-        #     print(f'Generated explanations in {explanation.available_explanations}')
-        #
-        #     path = 'feature_importance_%s.png' % node_index
-        #     explanation.visualize_feature_importance(path, top_k=10)
-        #     print(f"Feature importance plot has been saved to '{path}'")
-        #
-        #     path = 'subgraph_%s.pdf' % node_index
-        #     explanation.visualize_graph(path)
-        #     print(f"Subgraph visualization plot has been saved to '{path}'")
+    return accuracy
 
 
 def main():
-    if not os.path.isdir("results"):
-        os.mkdir("results")
-
     args = make_args()
 
     # Setting up GPU Vs. CPU Usage
     if args.gpu:
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
-        print("Using GPU {}".format(os.environ["CUDA_VISIBLE_DEVICES"]))
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(args.cuda)
+        print('Using GPU {}'.format(os.environ['CUDA_VISIBLE_DEVICES']))
     else:
-        print("Using CPU")
+        print('Using CPU')
 
-    if args.dataset == "all":
-        datasets_name = []
-        for _, _, files in os.walk(DATASET_DIR):
-            for file in files:
-                if re.compile("trimmed_fev1_.*_.*_adj\.csv").match(file):
-                    datasets_name.append(file)
-    else:
-        datasets_name = [args.dataset]
-
-    # Hyperparameter Tuning
+    # Setting up Hyperparameter Tuning
     if args.tune:
-        for dataset_name in datasets_name:
-            reporter = CLIReporter(metric_columns=["loss"])
-            GRACE_PERIOD = 10
-            # Scheduler to stop bad performing trials
-            scheduler = ASHAScheduler(
-                metric="loss", mode="min", grace_period=GRACE_PERIOD, reduction_factor=2
-            )
+        print("Tuning the Hyperparameters of the Pipeline")
+        global HYPERPARAMETERS_TUNING
+        HYPERPARAMETERS_TUNING = True
 
-            # Limit on the number of trials
-            # NUM_SAMPLES = 5000
-            NUM_SAMPLES = 1000
-            result = tune.run(
-                partial(train, args=args, datasets_name=[dataset_name]),
-                resources_per_trial={"cpu": 8, "gpu": 0},
-                config=GCN_CONFIG,
-                num_samples=NUM_SAMPLES,
-                scheduler=scheduler,
-                local_dir="outputs/raytune_results_%s" % dataset_name,
-                name="GCN_SHAP",
-                keep_checkpoints_num=1,
-                checkpoint_score_attr="min-loss",
-                progress_reporter=reporter,
-            )
+
+    accuracies = []
+    omics_datasets, omics_networks_tg = get_dataset()
+    # print(omics_datasets)
+    # print(omics_networks_tg)
+
+    if args.tune:
+        os.environ['TUNE_DISABLE_STRICT_METRIC_CHECKING'] = '1'
+        for (omics_dataset, omics_network_tg) in zip(omics_datasets, omics_networks_tg):
+            reporter = CLIReporter(metric_columns=["loss"])
+            # Scheduler to Stop Bad Performing Trials
+            scheduler = ASHAScheduler(
+                metric="loss",  # TODO: Consider using Accuracy as a Metric
+                mode="min",
+                grace_period=10,
+                reduction_factor=2)
+
+            NUM_SAMPLES = 10000  # TODO: Need to Run without Limiting the Number of Samples
+            result = tune.run(partial(train_n, omics_dataset=omics_dataset, omics_network_tg=omics_network_tg),
+                              resources_per_trial={"cpu": 8, "gpu": 0},
+                              config=PIPELINE_CONFIGS, num_samples=NUM_SAMPLES, scheduler=scheduler,
+                              storage_path='/home/shussein/NetCO/GitHubCode/BioInformedSubjectRepresentation/BioInformedPipeline/raytune_results',
+                              name='TuningFormerSmokers_%s' % omics_network_tg.x.shape[0],  # TODO: Update based on the Name of the Network
+                              keep_checkpoints_num=1,
+                              checkpoint_score_attr='min-loss',
+                              progress_reporter=reporter
+                              )
             best_trial = result.get_best_trial("loss", "min", "last")
             print("Best trial config: {}".format(best_trial.config))
-            print(
-                "Best trial final test loss: {}".format(best_trial.last_result["loss"])
-            )
+            print("Best trial final test loss: {}".format(best_trial.last_result["loss"]))
     else:
-        train(
-            config={
-                "lr": args.lr,
-                "weight_decay": args.weight_decay,
-                "layer_num": args.layer_num,
-                "hidden_dim": args.hidden_dim,
-                "epoch_num": args.epoch_num,
-            },
-            args=args,
-            datasets_name=datasets_name,
-        )
+        for (omics_dataset, omics_network_tg) in zip(omics_datasets, omics_networks_tg):
+            print(omics_network_tg)
+            for i in range(args.repeat_num):
+                accuracy = train_n(config={
+                    'gnn_layer_num': 4,
+                    'gnn_hidden_dim': 16,
+                    'lr': 0.029352058542109778,
+                    'weight_decay': 0.00010178240820048331,
+                    'nn_hidden_dim1': 8,
+                    'nn_hidden_dim2': 4,
+                    'num_epochs': 10,
+                }, omics_dataset=omics_dataset, omics_network_tg=omics_network_tg)
+                # print("Accuracy: {}".format(accuracy))
+                accuracies.append(accuracy)
+            print("Best Accuracy: {}".format(max(accuracies)))
+            print("Average Accuracy is {}".format(sum(accuracies) / len(accuracies)))
+            print("Standard Deviation for Avg Accuracy is {}".format(statistics.stdev(accuracies)))
 
 
 if __name__ == "__main__":
