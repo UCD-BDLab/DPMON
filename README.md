@@ -1,26 +1,26 @@
 # <p align="center">Learning from Multi-Omics Networks to Enhance Disease Prediction: An Optimized Network Embedding and Fusion Approach</p>
 
 <p align="center">
-  This repository contains the code and supplementary material for the paper <strong>"Learning from Multi-omics Networks to Enhance Disease Prediction using Graph Neural Networks"</strong>, accepted at IEEE BIBM 2024. The paper will be published soon and added to this README.
+  This repository contains the code and supplementary material for the paper <strong>"Learning from Multi-omics Networks to Enhance Disease Prediction using Graph Neural Networks"</strong>, published in the 2024 IEEE International Conference on Bioinformatics and Biomedicine (BIBM).
 </p>
 
 ---
 
-DPMON (**D**isease **P**rediction
-using **M**ulti-**O**mics **N**etworks), is a novel pipeline that leverages the power of Graph Neural Networks (GNNs) to 
-capture intricate relationships between biological entities and extract valuable knowledge from this network structure. GNNs, 
-unlike traditional methods like DeepWalk, LINE, or Node2Vec , which rely on random walks or edge sampling,
-capture both local and global graph structure and directly incorporate node features alongside the network structure,
-leading to a more informative and context-aware representation of the features. The generated representations are then
-integrated with the original multi-omics data to enrich the subjects’ representation. This dataset is further processed through
-a Neural Network (NN) component, specifically designed to predict the disease phenotype. Importantly, DPMON is
-optimized end-to-end, i.e., all components, including the GNN and the subsequent NN, are trained simultaneously. This end-
-to-end optimization ensures that the node embeddings are not just reflective of the network’s structure but are also tailored
-to enhance the predictive power of the final model. Our work departs from the aforementioned traditional paradigm
-by prioritizing the extraction of informative representations from the network itself, which are then integrated with patient-
-level data to enhance predictive performance. By focusing on the intrinsic connectivity of the multi-omics networks,
-rather than subject-specific variations, our method reduces the risk of overfitting to individual data points and improves the
-generalizability of the model.
+**Published Paper:**
+Understanding complex diseases hinges on a profound understanding of intricate biomolecular interactions unfolding within a complex, multidimensional landscape, challenging traditional methods to extract meaningful insights. While multi-omics networks capture the richness of biological data, their inherent complexity limits their predictive power. To address this challenge, we introduce a novel pipeline that leverages the power of Graph Neural Networks (GNNs) to extract and integrate meaningful information from multi-omics networks. Our findings underscore the potential of GNNs to significantly improve disease prediction by effectively extracting and representing knowledge embedded within multi-omics networks.
+
+- **Published In:** 2024 IEEE International Conference on Bioinformatics and Biomedicine (BIBM)
+- **Conference Dates:** 03-06 December 2024
+- **DOI:** [10.1109/BIBM62325.2024.10822233](https://doi.org/10.1109/BIBM62325.2024.10822233)
+- **Conference Location:** Lisbon, Portugal
+- **Date Added to IEEE Xplore:** 10 January 2025
+
+---
+
+DPMON (**D**isease **P**rediction using **M**ulti-**O**mics **N**etworks) is a novel pipeline that leverages the power of Graph Neural Networks (GNNs) to capture intricate relationships between biological entities and extract valuable knowledge from this network structure. GNNs, unlike traditional methods like DeepWalk, LINE, or Node2Vec, capture both local and global graph structures and directly incorporate node features alongside the network structure, leading to a more informative and context-aware representation of the features. The generated representations are then integrated with the original multi-omics data to enrich the subjects’ representation. This dataset is further processed through a Neural Network (NN) component, specifically designed to predict the disease phenotype. Importantly, DPMON is optimized end-to-end, ensuring the node embeddings enhance the predictive power of the final model.
+
+---
+
 ## Table of Contents
 
 - [Dataset Description](#dataset-description)
@@ -41,9 +41,9 @@ generalizability of the model.
 ## Dataset Description
 
 ---
-The COPDGene study is a multi-center observational study to identify the factors associated with COPD. The study recruited 
-10,198 current and former smokers with at least a 10-pack-year history of smoking, as well as additional never-smoker 
-controls (defined as having smoked fewer than 100 cigarettes in their lifetime) both with and without COPD. Genotyping 
+The COPDGene study is a multi-center observational study to identify the factors associated with COPD. The study recruited
+10,198 current and former smokers with at least a 10-pack-year history of smoking, as well as additional never-smoker
+controls (defined as having smoked fewer than 100 cigarettes in their lifetime) both with and without COPD. Genotyping
 data were from the enrollment visit and proteomics were generated at the five-year follow-up
 (2013 to 2017). This rich multi-omics dataset serves as the foundation for our study.
 To capture the complex interconnections between -omics, we constructed several networks using Sparse Generalized
@@ -69,10 +69,10 @@ The datasets used in this study focus on Chronic Obstructive Pulmonary Disease (
 
 ---
 
-Fig. 1 details our multi-omics data integration pipeline (DPMON) for improved phenotype prediction. This pipeline consists 
-of four main components: **1)** a Graph Neural Network (GNN) for Feature Embeddings, **2)** Dimensionality Reduction of the 
-Embeddings, **3)** Integration of Embeddings into the Multi-omics Dataset, and **4)** a Neural Network (NN) for 
-Phenotype Prediction. The entire pipeline is trained end-to-end, ensuring joint optimization of the GNN and the NN parameters 
+Fig. 1 details our multi-omics data integration pipeline (DPMON) for improved phenotype prediction. This pipeline consists
+of four main components: **1)** a Graph Neural Network (GNN) for Feature Embeddings, **2)** Dimensionality Reduction of the
+Embeddings, **3)** Integration of Embeddings into the Multi-omics Dataset, and **4)** a Neural Network (NN) for
+Phenotype Prediction. The entire pipeline is trained end-to-end, ensuring joint optimization of the GNN and the NN parameters
 based on the prediction loss.
 
 ![Methodology Diagram](Assets/diagram.png)
@@ -247,7 +247,7 @@ GCN and GIN across all network conditions. This
 suggests that the attention mechanism employed by
 GAT effectively captures the complex relationships
 within multi-omics networks, leading to improved
-feature representation and predictive power. 
+feature representation and predictive power.
 * Network Density Impact: While there is some
 variation in performance across different network
 densities, the overall trend indicates that moderately
@@ -255,7 +255,7 @@ dense networks tend to yield slightly better results
 compared to complete or dense networks. This sug-
 gests that a balance between network connectivity
 and information richness is crucial for optimal per-
-formance. 
+formance.
 * GIN Performance: GIN consistently demonstrates
 lower accuracy compared to GCN and GAT. This
 could be due to the increased complexity of the
@@ -306,7 +306,7 @@ source dpmon_env/bin/activate
 components.
 
 ```bash
-python main.py --gnn_model <GNNModel> --dataset_dir <DatasetDirectory> --tune 
+python main.py --gnn_model <GNNModel> --dataset_dir <DatasetDirectory> --tune
 ```
 **Parameters:**
 * `--gnn_model`: The GNN model to use (e.g., GCN, GAT, SAGE, and GIN).
